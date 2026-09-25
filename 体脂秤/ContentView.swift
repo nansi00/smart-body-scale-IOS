@@ -991,7 +991,12 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
             if isStable { handleStableWeight(liveWeight) }
         case .history:
             if let item = packet.historyMeasurement(profile: profile, history: history) {
-                let isDuplicate = history.contains { abs($0.weight - item.weight) < 0.05 && abs($0.date.timeIntervalSince(item.date)) < 120 }
+                // Dedupe replayed history packets: a genuine re-weigh takes at least
+                // ~15-20 s (step off, scale zeroes, step on, stabilize), while a
+                // duplicate replay of the same measurement arrives within 1-2 s.
+                // A wider window would wrongly swallow consecutive weigh-ins of the
+                // same person (nearly identical weight).
+                let isDuplicate = history.contains { abs($0.weight - item.weight) < 0.05 && abs($0.date.timeIntervalSince(item.date)) < 15 }
                 guard item.weight >= minimumValidWeight, !isDuplicate else {
                     log("[BLE] History packet - skipped (noise or duplicate): \(item.weight) kg")
                     return
