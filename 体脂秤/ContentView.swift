@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 @preconcurrency import CoreBluetooth
 import Combine
+import Charts
 
 @main struct AntAfouScaleApp: App {
     @StateObject private var scale = ScaleManager()
@@ -22,6 +23,7 @@ struct ContentView: View {
     @State private var tab = 0
     @AppStorage("afu.hasPairedScale") private var hasPairedScale = false
     @AppStorage("afu.family.hasPromptedInitial") private var hasPromptedInitial = false
+    @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
     @State private var showingMemberSheet = false
     @State private var showingInitialPrompt = false
     @State private var showingUnknownMember = false
@@ -58,7 +60,7 @@ struct ContentView: View {
             Button("暂不添加", role: .cancel) { scale.clearUnrecognizedWeight() }
             Button("添加成员") { showingMemberSheet = true }
         } message: {
-            Text("检测到 \(suggestedWeight ?? 0, specifier: "%.2f") kg 的体重与现有成员差异较大，是否添加新成员？")
+            Text("检测到 \(weightUnit.convert(suggestedWeight ?? 0), specifier: "%.2f") \(weightUnit.label) 的体重与现有成员差异较大，是否添加新成员？")
         }
         .sheet(isPresented: $showingMemberSheet) {
             AddFamilyMemberView(referenceWeight: suggestedWeight) { member in
@@ -78,6 +80,7 @@ struct ContentView: View {
 struct DashboardView: View {
     @EnvironmentObject private var scale: ScaleManager
     @EnvironmentObject private var profile: UserProfile
+    @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
 
     var body: some View {
         NavigationStack {
@@ -135,9 +138,9 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                 
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(String(format: "%.2f", scale.liveWeight))
+                    Text(String(format: "%.2f", weightUnit.convert(scale.liveWeight)))
                         .font(.system(size: 48, weight: .bold, design: .rounded))
-                    Text("kg").font(.title3).fontWeight(.semibold)
+                    Text(weightUnit.label).font(.title3).fontWeight(.semibold)
                 }
             }
             .padding(.vertical, 4)
@@ -147,15 +150,16 @@ struct DashboardView: View {
     }
 
     private func metricGrid(_ m: BodyMeasurement) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+        let u = weightUnit.label
+        return LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             MetricTile(title: "BMI", valueString: String(format: "%.2f", m.bmi), icon: "figure.stand")
-            MetricTile(title: "体脂率/量", valueString: String(format: "%.1f%% / %.1f kg", m.bodyFat, m.bodyFatMass), icon: "drop.fill")
-            MetricTile(title: "肌肉率/量", valueString: String(format: "%.1f%% / %.1f kg", m.musclePercent, m.muscle), icon: "figure.strengthtraining.traditional")
-            MetricTile(title: "骨骼肌率/量", valueString: String(format: "%.1f%% / %.1f kg", m.skeletalMusclePercent, m.skeletalMuscleMass), icon: "figure.core.training")
-            MetricTile(title: "体水分率/量", valueString: String(format: "%.1f%% / %.1f kg", m.water, m.waterMass), icon: "water.waves")
-            MetricTile(title: "蛋白质率/量", valueString: String(format: "%.1f%% / %.1f kg", m.protein, m.proteinMass), icon: "leaf.fill")
-            MetricTile(title: "骨量率/量", valueString: String(format: "%.1f%% / %.1f kg", m.boneMassPercent, m.boneMass), icon: "shield.fill")
-            MetricTile(title: "皮下脂肪率/量", valueString: String(format: "%.1f%% / %.1f kg", m.subcutaneousFatPercent, m.subcutaneousFatMass), icon: "drop.triangle.fill")
+            MetricTile(title: "体脂率/量", valueString: String(format: "%.1f%% / %.1f %@", m.bodyFat, weightUnit.convert(m.bodyFatMass), u), icon: "drop.fill")
+            MetricTile(title: "肌肉率/量", valueString: String(format: "%.1f%% / %.1f %@", m.musclePercent, weightUnit.convert(m.muscle), u), icon: "figure.strengthtraining.traditional")
+            MetricTile(title: "骨骼肌率/量", valueString: String(format: "%.1f%% / %.1f %@", m.skeletalMusclePercent, weightUnit.convert(m.skeletalMuscleMass), u), icon: "figure.core.training")
+            MetricTile(title: "体水分率/量", valueString: String(format: "%.1f%% / %.1f %@", m.water, weightUnit.convert(m.waterMass), u), icon: "water.waves")
+            MetricTile(title: "蛋白质率/量", valueString: String(format: "%.1f%% / %.1f %@", m.protein, weightUnit.convert(m.proteinMass), u), icon: "leaf.fill")
+            MetricTile(title: "骨量率/量", valueString: String(format: "%.1f%% / %.1f %@", m.boneMassPercent, weightUnit.convert(m.boneMass), u), icon: "shield.fill")
+            MetricTile(title: "皮下脂肪率/量", valueString: String(format: "%.1f%% / %.1f %@", m.subcutaneousFatPercent, weightUnit.convert(m.subcutaneousFatMass), u), icon: "drop.triangle.fill")
         }
     }
 
@@ -192,33 +196,159 @@ struct MetricTile: View {
 
 struct HistoryView: View {
     @EnvironmentObject private var scale: ScaleManager
+    @EnvironmentObject private var profile: UserProfile
+    @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
+    @State private var selectedMemberID: UUID?
+
+    private var filteredHistory: [BodyMeasurement] {
+        guard let selectedMemberID else { return scale.history }
+        return scale.history.filter { $0.memberID == selectedMemberID }
+    }
+
+    private var allMembers: [FamilyMember] { [profile.primaryMember] + profile.members }
+
     var body: some View {
         NavigationStack {
             List {
-                if scale.history.isEmpty { EmptyStateView(title: "还没有测量记录", icon: "calendar.badge.clock", message: "完成首次测量后，记录将保存在这里。") }
-                ForEach(scale.history) { item in
-                    NavigationLink(destination: MeasurementDetailView(measurement: item)) {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(item.memberName ?? "本人").fontWeight(.semibold)
-                                Text(item.date, format: .dateTime.year().month().day().hour().minute())
-                                Text("BMI \(item.bmi, specifier: "%.2f") · 体脂 \(item.bodyFat, specifier: "%.1f")%")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text("\(item.weight, specifier: "%.2f") kg")
-                                .fontWeight(.semibold)
-                        }
+                if scale.history.isEmpty {
+                    EmptyStateView(title: "还没有测量记录", icon: "calendar.badge.clock", message: "完成首次测量后，记录将保存在这里。")
+                } else {
+                    if allMembers.count > 1 {
+                        memberFilterRow
                     }
-                }.onDelete { scale.removeHistory(at: $0) }
+                    Section {
+                        WeightTrendChart(measurements: Array(filteredHistory.prefix(30)), unit: weightUnit)
+                            .frame(height: 190)
+                            .padding(.vertical, 6)
+                    } header: {
+                        Text("体重趋势（近 \(min(filteredHistory.count, 30)) 次）")
+                    }
+                    ForEach(filteredHistory) { item in
+                        NavigationLink(destination: MeasurementDetailView(measurement: item)) {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.memberName ?? "本人").fontWeight(.semibold)
+                                    Text(item.date, format: .dateTime.year().month().day().hour().minute())
+                                    Text("BMI \(item.bmi, specifier: "%.2f") · 体脂 \(item.bodyFat, specifier: "%.1f")%")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(weightUnit.convert(item.weight), specifier: "%.2f") \(weightUnit.label)")
+                                    .fontWeight(.semibold)
+                            }
+                        }
+                    }.onDelete { offsets in
+                        let ids = offsets.map { filteredHistory[$0].id }
+                        let globalOffsets = IndexSet(ids.compactMap { id in scale.history.firstIndex(where: { $0.id == id }) })
+                        scale.removeHistory(at: globalOffsets)
+                    }
+                }
             }.navigationTitle("测量历史")
         }
     }
+
+    private var memberFilterRow: some View {
+        Section {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    memberChip(id: nil, name: "全部", count: scale.history.count)
+                    ForEach(allMembers) { member in
+                        memberChip(id: member.id, name: member.name, count: scale.history.filter { $0.memberID == member.id }.count)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    private func memberChip(id: UUID?, name: String, count: Int) -> some View {
+        let selected = selectedMemberID == id
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) { selectedMemberID = id }
+        } label: {
+            Text("\(name) (\(count))")
+                .font(.subheadline)
+                .fontWeight(selected ? .semibold : .regular)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(selected ? Color.teal : Color.teal.opacity(0.10), in: Capsule())
+                .foregroundStyle(selected ? .white : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct WeightTrendChart: View {
+    let measurements: [BodyMeasurement] // newest first
+    let unit: WeightUnit
+
+    private var points: [BodyMeasurement] { measurements.sorted { $0.date < $1.date } }
+    private var weights: [Double] { points.map { unit.convert($0.weight) } }
+    private var minW: Double { weights.min() ?? 0 }
+    private var maxW: Double { weights.max() ?? 0 }
+    private var avgW: Double { weights.isEmpty ? 0 : weights.reduce(0, +) / Double(weights.count) }
+
+    var body: some View {
+        if points.count >= 2 {
+            VStack(alignment: .leading, spacing: 8) {
+                Chart(points) { item in
+                    LineMark(
+                        x: .value("日期", item.date),
+                        y: .value("体重", unit.convert(item.weight))
+                    )
+                    .foregroundStyle(Color.teal)
+                    .interpolationMethod(.catmullRom)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+
+                    AreaMark(
+                        x: .value("日期", item.date),
+                        y: .value("体重", unit.convert(item.weight))
+                    )
+                    .foregroundStyle(LinearGradient(colors: [.teal.opacity(0.25), .teal.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value("日期", item.date),
+                        y: .value("体重", unit.convert(item.weight))
+                    )
+                    .foregroundStyle(Color.teal)
+                    .symbolSize(points.count > 15 ? 12 : 30)
+                }
+                .chartYScale(domain: (minW - yPadding)...(maxW + yPadding))
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(format: .dateTime.month(.twoDigits).day(.twoDigits))
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: .automatic(desiredCount: 4))
+                }
+
+                HStack(spacing: 14) {
+                    Label(String(format: "最低 %.1f %@", minW, unit.label), systemImage: "arrow.down")
+                    Label(String(format: "最高 %.1f %@", maxW, unit.label), systemImage: "arrow.up")
+                    Label(String(format: "均值 %.1f %@", avgW, unit.label), systemImage: "chart.line.flattrend.xyaxis")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+            }
+        } else {
+            EmptyStateView(title: "记录不足", icon: "chart.xyaxis.line", message: "至少需要 2 条测量记录才能生成趋势曲线。")
+                .frame(height: 180)
+        }
+    }
+
+    private var yPadding: Double { max((maxW - minW) * 0.3, unit.convert(0.5)) }
 }
 
 struct MeasurementDetailView: View {
     let measurement: BodyMeasurement
+    @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
     
     var body: some View {
         VStack(spacing: 16) {
@@ -251,9 +381,9 @@ struct MeasurementDetailView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("测量体重").font(.caption).foregroundStyle(.secondary)
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(String(format: "%.2f", measurement.weight))
+                            Text(String(format: "%.2f", weightUnit.convert(measurement.weight)))
                                 .font(.system(size: 34, weight: .bold, design: .rounded))
-                            Text("kg").font(.subheadline).fontWeight(.semibold)
+                            Text(weightUnit.label).font(.subheadline).fontWeight(.semibold)
                         }
                     }
                     Spacer()
@@ -275,13 +405,14 @@ struct MeasurementDetailView: View {
                 Text("身体指标详情").font(.headline).foregroundStyle(.secondary).padding(.leading, 4)
                 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                    MetricTile(title: "体脂率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.bodyFat, measurement.bodyFatMass), icon: "drop.fill")
-                    MetricTile(title: "肌肉率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.musclePercent, measurement.muscle), icon: "figure.strengthtraining.traditional")
-                    MetricTile(title: "骨骼肌率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.skeletalMusclePercent, measurement.skeletalMuscleMass), icon: "figure.core.training")
-                    MetricTile(title: "体水分率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.water, measurement.waterMass), icon: "water.waves")
-                    MetricTile(title: "蛋白质率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.protein, measurement.proteinMass), icon: "leaf.fill")
-                    MetricTile(title: "骨量率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.boneMassPercent, measurement.boneMass), icon: "shield.fill")
-                    MetricTile(title: "皮下脂肪率/量", valueString: String(format: "%.1f%% / %.1f kg", measurement.subcutaneousFatPercent, measurement.subcutaneousFatMass), icon: "drop.triangle.fill")
+                    let u = weightUnit.label
+                    MetricTile(title: "体脂率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.bodyFat, weightUnit.convert(measurement.bodyFatMass), u), icon: "drop.fill")
+                    MetricTile(title: "肌肉率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.musclePercent, weightUnit.convert(measurement.muscle), u), icon: "figure.strengthtraining.traditional")
+                    MetricTile(title: "骨骼肌率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.skeletalMusclePercent, weightUnit.convert(measurement.skeletalMuscleMass), u), icon: "figure.core.training")
+                    MetricTile(title: "体水分率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.water, weightUnit.convert(measurement.waterMass), u), icon: "water.waves")
+                    MetricTile(title: "蛋白质率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.protein, weightUnit.convert(measurement.proteinMass), u), icon: "leaf.fill")
+                    MetricTile(title: "骨量率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.boneMassPercent, weightUnit.convert(measurement.boneMass), u), icon: "shield.fill")
+                    MetricTile(title: "皮下脂肪率/量", valueString: String(format: "%.1f%% / %.1f %@", measurement.subcutaneousFatPercent, weightUnit.convert(measurement.subcutaneousFatMass), u), icon: "drop.triangle.fill")
                 }
             }
             Spacer()
@@ -328,6 +459,7 @@ struct ProfileView: View {
     @EnvironmentObject private var profile: UserProfile
     @EnvironmentObject private var scale: ScaleManager
     @AppStorage("afu.hasPairedScale") private var hasPairedScale = false
+    @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
     @State private var showingAddMember = false
     var body: some View {
         NavigationStack { Form {
@@ -336,7 +468,12 @@ struct ProfileView: View {
                 Button { scale.startScan() } label: { Label("重新连接", systemImage: "arrow.clockwise") }
                 Button(role: .destructive) { hasPairedScale = false } label: { Label("更换体脂秤", systemImage: "arrow.triangle.2.circlepath") }
             }
-            Section("个人资料") { Picker("性别", selection: $profile.sex) { Text("女").tag(Sex.female); Text("男").tag(Sex.male) }; DatePicker("出生日期", selection: $profile.birthDate, displayedComponents: .date); Stepper("身高 \(Int(profile.height)) cm", value: $profile.height, in: 100...230) }
+            Section("个人资料") {
+                Picker("性别", selection: $profile.sex) { Text("女").tag(Sex.female); Text("男").tag(Sex.male) }
+                DatePicker("出生日期", selection: $profile.birthDate, displayedComponents: .date)
+                Stepper("身高 \(Int(profile.height)) cm", value: $profile.height, in: 100...230)
+                Picker("体重单位", selection: $weightUnit) { ForEach(WeightUnit.allCases) { Text($0.displayName).tag($0) } }
+            }
             Section {
                 ForEach(profile.members) { member in
                     HStack { Image(systemName: "person.crop.circle").foregroundStyle(.teal); Text(member.name); Spacer(); Text(member.sex == .female ? "女" : "男").font(.caption).foregroundStyle(.secondary) }
@@ -399,6 +536,21 @@ struct AddFamilyMemberView: View {
 }
 
 enum Sex: String, CaseIterable, Codable { case female, male }
+
+enum WeightUnit: String, CaseIterable, Identifiable {
+    case kg, jin, lb
+    var id: String { rawValue }
+    var label: String { switch self { case .kg: "kg"; case .jin: "斤"; case .lb: "lb" } }
+    var displayName: String { switch self { case .kg: "千克 (kg)"; case .jin: "斤"; case .lb: "磅 (lb)" } }
+    /// Convert a value stored in kg to this unit.
+    func convert(_ kg: Double) -> Double {
+        switch self {
+        case .kg: return kg
+        case .jin: return kg * 2
+        case .lb: return kg * 2.2046226218
+        }
+    }
+}
 
 struct FamilyMember: Identifiable, Codable {
     let id: UUID
@@ -486,6 +638,12 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
     @Published var unrecognizedWeight: Double?
     @Published var debugLogs: [String] = []
     private var hasSavedMeasurement = false
+    // MARK: - Stable-weight confirmation (anti premature-record)
+    /// Minimum plausible body weight (kg). Readings below this are ramp/noise from stepping on or off the scale.
+    private let minimumValidWeight = 5.0
+    private var lastStableWeight = 0.0
+    private var stableRepeatCount = 0
+    private var stableConfirmWorkItem: DispatchWorkItem?
 
     func log(_ message: String) {
         let formatter = DateFormatter()
@@ -520,9 +678,10 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
     func connect(_ device: DiscoveredScale) { central.stopScan(); isScanning = false; connectionState = .connecting; activePeripheral = device.peripheral; central.connect(device.peripheral) }
     func removeHistory(at offsets: IndexSet) { history.remove(atOffsets: offsets); saveHistory() }
     private func finishMeasurement() {
-        guard liveWeight > 0, let profile else { return }
+        guard liveWeight >= minimumValidWeight, liveWeight < 500, let profile else { return }
         guard !hasSavedMeasurement else { return }
         hasSavedMeasurement = true
+        resetStableTracking()
         let isNewMember = profile.shouldSuggestNewMember(for: liveWeight, history: history)
         let member = profile.matchedMember(for: liveWeight, history: history)
         let measurement = BodyAlgorithm.measure(weight: liveWeight, impedance: impedance, member: member)
@@ -532,6 +691,48 @@ enum ConnectionState: Equatable { case bluetoothOff, idle, scanning, connecting,
         saveHistory()
         log("[BLE] Stored stable measurement: weight=\(liveWeight) kg, impedance=\(impedance) Ohm")
     }
+    /// Records a measurement only after the stable reading is confirmed:
+    /// the same weight (±0.05 kg) must appear in at least 3 consecutive stable packets,
+    /// with a 1.5 s timer fallback for scales that emit a stable packet only once.
+    private func handleStableWeight(_ weight: Double) {
+        guard impedance > 0, weight >= minimumValidWeight, weight < 500 else { return }
+        if abs(weight - lastStableWeight) < 0.05 {
+            stableRepeatCount += 1
+        } else {
+            lastStableWeight = weight
+            stableRepeatCount = 1
+            scheduleStableConfirmation()
+        }
+        log("[BLE] Stable candidate: \(weight) kg, repeat=\(stableRepeatCount)")
+        if stableRepeatCount >= 3 {
+            stableConfirmWorkItem?.cancel()
+            stableConfirmWorkItem = nil
+            finishMeasurement()
+        }
+    }
+
+    private func scheduleStableConfirmation() {
+        stableConfirmWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.isStable, !self.hasSavedMeasurement,
+                  self.impedance > 0,
+                  self.liveWeight >= self.minimumValidWeight,
+                  abs(self.liveWeight - self.lastStableWeight) < 0.05 else { return }
+            self.log("[BLE] Stable confirmed by timer fallback: \(self.liveWeight) kg")
+            self.finishMeasurement()
+        }
+        stableConfirmWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: item)
+    }
+
+    private func resetStableTracking() {
+        stableRepeatCount = 0
+        lastStableWeight = 0
+        stableConfirmWorkItem?.cancel()
+        stableConfirmWorkItem = nil
+    }
+
     func clearUnrecognizedWeight() { unrecognizedWeight = nil }
     func assignUnrecognizedMeasurement(to member: FamilyMember) {
         guard let measurement = currentMeasurement, let index = history.firstIndex(where: { $0.id == measurement.id }) else { return }
@@ -610,6 +811,7 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
         isStable = false
         isMeasuring = false
         hasSavedMeasurement = false
+        resetStableTracking()
         if UserDefaults.standard.bool(forKey: "afu.hasPairedScale") {
             log("[BLE] Restarting scan after disconnection...")
             startScan()
@@ -692,24 +894,30 @@ extension ScaleManager: @preconcurrency CBCentralManagerDelegate, @preconcurrenc
             
             if liveWeight < 1.0 || isMeasuring {
                 hasSavedMeasurement = false
+                resetStableTracking()
             }
             if isMeasuring && liveWeight > 3.0 {
                 currentMeasurement = nil
             }
-            
+
             // Extract impedance from the same D5 packet if present
             if packet.raw.first == 0xAC && packet.impedance > 0 {
                 impedance = packet.impedance
                 log("[BLE] Extracted impedance from weight packet: \(impedance)")
             }
-            
-            if packet.stable && impedance > 0 { finishMeasurement() }
+
+            if packet.stable { handleStableWeight(packet.weight) }
         case .impedance:
             impedance = packet.impedance
             log("[BLE] Impedance packet - impedance: \(impedance)")
-            if isStable { finishMeasurement() }
+            if isStable { handleStableWeight(liveWeight) }
         case .history:
             if let item = packet.historyMeasurement(profile: profile, history: history) {
+                let isDuplicate = history.contains { abs($0.weight - item.weight) < 0.05 && abs($0.date.timeIntervalSince(item.date)) < 120 }
+                guard item.weight >= minimumValidWeight, !isDuplicate else {
+                    log("[BLE] History packet - skipped (noise or duplicate): \(item.weight) kg")
+                    return
+                }
                 history.insert(item, at: 0)
                 saveHistory()
                 log("[BLE] History packet - added measurement: \(item)")
