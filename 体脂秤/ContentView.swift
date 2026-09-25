@@ -199,6 +199,7 @@ struct HistoryView: View {
     @EnvironmentObject private var profile: UserProfile
     @AppStorage("afu.weightUnit") private var weightUnit: WeightUnit = .kg
     @State private var selectedMemberID: UUID?
+    @State private var selectedMetric: TrendMetric = .weight
 
     private var filteredHistory: [BodyMeasurement] {
         guard let selectedMemberID else { return scale.history }
@@ -217,11 +218,21 @@ struct HistoryView: View {
                         memberFilterRow
                     }
                     Section {
-                        WeightTrendChart(measurements: Array(filteredHistory.prefix(30)), unit: weightUnit)
-                            .frame(height: 190)
-                            .padding(.vertical, 6)
+                        VStack(alignment: .leading, spacing: 6) {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(TrendMetric.allCases) { metric in
+                                        metricChip(metric)
+                                    }
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            WeightTrendChart(measurements: Array(filteredHistory.prefix(30)), unit: weightUnit, metric: selectedMetric)
+                                .frame(height: 190)
+                        }
+                        .padding(.vertical, 6)
                     } header: {
-                        Text("体重趋势（近 \(min(filteredHistory.count, 30)) 次）")
+                        Text("\(selectedMetric.displayName)趋势（近 \(min(filteredHistory.count, 30)) 次）")
                     }
                     ForEach(filteredHistory) { item in
                         NavigationLink(destination: MeasurementDetailView(measurement: item)) {
@@ -279,17 +290,34 @@ struct HistoryView: View {
         }
         .buttonStyle(.plain)
     }
+
+    private func metricChip(_ metric: TrendMetric) -> some View {
+        let selected = selectedMetric == metric
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) { selectedMetric = metric }
+        } label: {
+            Text(metric.displayName)
+                .font(.caption)
+                .fontWeight(selected ? .semibold : .regular)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(selected ? Color.mint : Color.mint.opacity(0.12), in: Capsule())
+                .foregroundStyle(selected ? .white : .primary)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 struct WeightTrendChart: View {
     let measurements: [BodyMeasurement] // newest first
     let unit: WeightUnit
+    let metric: TrendMetric
 
     private var points: [BodyMeasurement] { measurements.sorted { $0.date < $1.date } }
-    private var weights: [Double] { points.map { unit.convert($0.weight) } }
-    private var minW: Double { weights.min() ?? 0 }
-    private var maxW: Double { weights.max() ?? 0 }
-    private var avgW: Double { weights.isEmpty ? 0 : weights.reduce(0, +) / Double(weights.count) }
+    private var values: [Double] { points.map { metric.value(of: $0, weightUnit: unit) } }
+    private var minV: Double { values.min() ?? 0 }
+    private var maxV: Double { values.max() ?? 0 }
+    private var avgV: Double { values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count) }
 
     var body: some View {
         if points.count >= 2 {
@@ -297,7 +325,7 @@ struct WeightTrendChart: View {
                 Chart(points) { item in
                     LineMark(
                         x: .value("日期", item.date),
-                        y: .value("体重", unit.convert(item.weight))
+                        y: .value(metric.displayName, metric.value(of: item, weightUnit: unit))
                     )
                     .foregroundStyle(Color.teal)
                     .interpolationMethod(.catmullRom)
@@ -305,19 +333,19 @@ struct WeightTrendChart: View {
 
                     AreaMark(
                         x: .value("日期", item.date),
-                        y: .value("体重", unit.convert(item.weight))
+                        y: .value(metric.displayName, metric.value(of: item, weightUnit: unit))
                     )
                     .foregroundStyle(LinearGradient(colors: [.teal.opacity(0.25), .teal.opacity(0.02)], startPoint: .top, endPoint: .bottom))
                     .interpolationMethod(.catmullRom)
 
                     PointMark(
                         x: .value("日期", item.date),
-                        y: .value("体重", unit.convert(item.weight))
+                        y: .value(metric.displayName, metric.value(of: item, weightUnit: unit))
                     )
                     .foregroundStyle(Color.teal)
                     .symbolSize(points.count > 15 ? 12 : 30)
                 }
-                .chartYScale(domain: (minW - yPadding)...(maxW + yPadding))
+                .chartYScale(domain: (minV - yPadding)...(maxV + yPadding))
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                         AxisGridLine()
@@ -329,9 +357,9 @@ struct WeightTrendChart: View {
                 }
 
                 HStack(spacing: 14) {
-                    Label(String(format: "最低 %.1f %@", minW, unit.label), systemImage: "arrow.down")
-                    Label(String(format: "最高 %.1f %@", maxW, unit.label), systemImage: "arrow.up")
-                    Label(String(format: "均值 %.1f %@", avgW, unit.label), systemImage: "chart.line.flattrend.xyaxis")
+                    Label(metric.format(minV, weightUnit: unit), systemImage: "arrow.down")
+                    Label(metric.format(maxV, weightUnit: unit), systemImage: "arrow.up")
+                    Label("均值 " + metric.format(avgV, weightUnit: unit), systemImage: "chart.line.flattrend.xyaxis")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -343,7 +371,7 @@ struct WeightTrendChart: View {
         }
     }
 
-    private var yPadding: Double { max((maxW - minW) * 0.3, unit.convert(0.5)) }
+    private var yPadding: Double { max((maxV - minV) * 0.3, metric == .weight ? unit.convert(0.5) : 0.5) }
 }
 
 struct MeasurementDetailView: View {
@@ -549,6 +577,51 @@ enum WeightUnit: String, CaseIterable, Identifiable {
         case .jin: return kg * 2
         case .lb: return kg * 2.2046226218
         }
+    }
+}
+
+/// Metrics that can be shown on the history trend chart.
+enum TrendMetric: String, CaseIterable, Identifiable {
+    case weight, bmi, bodyFat, muscle, skeletalMuscle, water, protein, boneMass, subcutaneousFat
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .weight: "体重"
+        case .bmi: "BMI"
+        case .bodyFat: "体脂率"
+        case .muscle: "肌肉率"
+        case .skeletalMuscle: "骨骼肌率"
+        case .water: "体水分率"
+        case .protein: "蛋白质率"
+        case .boneMass: "骨量率"
+        case .subcutaneousFat: "皮下脂肪率"
+        }
+    }
+    func unitLabel(weightUnit: WeightUnit) -> String {
+        switch self {
+        case .weight: return weightUnit.label
+        case .bmi: return ""
+        default: return "%"
+        }
+    }
+    func value(of m: BodyMeasurement, weightUnit: WeightUnit) -> Double {
+        switch self {
+        case .weight: return weightUnit.convert(m.weight)
+        case .bmi: return m.bmi
+        case .bodyFat: return m.bodyFat
+        case .muscle: return m.musclePercent
+        case .skeletalMuscle: return m.skeletalMusclePercent
+        case .water: return m.water
+        case .protein: return m.protein
+        case .boneMass: return m.boneMassPercent
+        case .subcutaneousFat: return m.subcutaneousFatPercent
+        }
+    }
+    var fractionDigits: Int { switch self { case .weight, .bmi: return 2; default: return 1 } }
+    func format(_ value: Double, weightUnit: WeightUnit) -> String {
+        let number = fractionDigits == 2 ? String(format: "%.2f", value) : String(format: "%.1f", value)
+        let suffix = unitLabel(weightUnit: weightUnit)
+        return suffix.isEmpty ? number : "\(number) \(suffix)"
     }
 }
 
